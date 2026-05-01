@@ -1,0 +1,39 @@
+{
+  "source_file": "C:\\Desktop\\2026-51MCM-Problem C\\C 附件(Attachment)\\附件1：两组位移时序数据-问题1.xlsx",
+  "rows": 10000,
+  "time_start": "2024-01-01 10:00:00",
+  "time_end": "2024-03-10 20:30:00",
+  "time_interval_counts": {
+    "0 days 00:10:00": 9999
+  },
+  "a_column": "数据A_光纤位移计数据_mm",
+  "b_column": "数据B_振弦式位移计数据_mm",
+  "missing_counts": {
+    "时间": 0,
+    "数据A_光纤位移计数据_mm": 0,
+    "数据B_振弦式位移计数据_mm": 0
+  },
+  "initial_zero_kept": 1,
+  "non_initial_zero_excluded_from_fit": 19,
+  "modeling_rows": 9981,
+  "final_model": {
+    "type": "HuberRegressor",
+    "epsilon": 1.35,
+    "alpha": 0.0,
+    "intercept": -0.5330952567392996,
+    "slope": 0.8817636774243202,
+    "calibration_expression": "y = -0.533095257 + 0.881763677 * x"
+  },
+  "outputs": {
+    "excel": "C:\\Desktop\\2026-51MCM-Problem C\\problem1_outputs\\data\\问题1_校正结果.xlsx",
+    "table_1_1": "C:\\Desktop\\2026-51MCM-Problem C\\problem1_outputs\\tables\\表1_1_校正结果.csv",
+    "metrics": "C:\\Desktop\\2026-51MCM-Problem C\\problem1_outputs\\tables\\问题1_校正前后误差指标.csv",
+    "cv": "C:\\Desktop\\2026-51MCM-Problem C\\problem1_outputs\\tables\\问题1_时间分块交叉验证.csv",
+    "zero_log": "C:\\Desktop\\2026-51MCM-Problem C\\problem1_outputs\\logs\\问题1_非初始零值异常日志.csv",
+    "figures": [
+      "C:\\Desktop\\2026-51MCM-Problem C\\problem1_outputs\\figures\\问题1_A_B散点与校正曲线.png",
+      "C:\\Desktop\\2026-51MCM-Problem C\\problem1_outputs\\figures\\问题1_校正前后残差箱线图.png",
+      "C:\\Desktop\\2026-51MCM-Problem C\\problem1_outputs\\figures\\问题1_校正前后误差对比.png"
+    ]
+  }
+}
