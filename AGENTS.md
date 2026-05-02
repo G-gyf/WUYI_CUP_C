@@ -950,6 +950,10 @@ problem3_solution.py
 
 问题3.2中，异常检测采用稳健统计与前置突变候选标记相结合的方式。共同异常点定义为同一编号下不少于 2 个变量同时异常。表3.1中“总数”为五个变量异常次数之和，不是异常编号去重数。
 
+为补充异常检测准则的选择依据，已对五个变量的建模序列进行分布诊断，输出直方图、偏度、超额峰度、高分位数和方差均值比。诊断结果显示，降雨量偏度约为 3.3319、超额峰度约为 12.9642，具有明显右偏和尖峰特征，不宜采用正态 3σ 作为主判据；微震事件数为非负整数计数变量，采用泊松分布仅作为离散性诊断参考，主判据采用百分位数与局部突增规则；孔隙水压力、深部位移和表面位移虽可将 3σ 作为对照，但主异常识别仍采用 MAD 稳健统计与局部趋势残差方法。
+
+本轮异常检测阈值口径为：连续监测变量采用趋势窗口 11 点、局部 MAD 窗口 31 点；降雨量不设置主滑动窗口，仅使用高分位孤立峰值与前后邻点持续性约束；微震事件数采用 11 点局部中位数窗口、非负整数约束和 P99.5 高分位阈值。
+
 问题3.3中，以表面位移为响应变量，以降雨量、孔隙水压力、微震事件数和深部位移为解释变量。模型比较包括普通线性回归、岭回归、Huber稳健回归和随机森林辅助对照。主模型采用岭回归，未纳入滞后项。
 
 ### 主要结果
@@ -1011,6 +1015,8 @@ problem3_outputs/tables/表3_1_单变量异常点数量.csv
 problem3_outputs/tables/表3_2_共同异常点清单.csv
 problem3_outputs/tables/问题3_关联分析指标.csv
 problem3_outputs/tables/问题3_变量贡献度.csv
+problem3_outputs/tables/问题3_变量分布统计.csv
+problem3_outputs/tables/问题3_异常判据说明.csv
 problem3_outputs/tables/问题3_模型检验指标.csv
 problem3_outputs/tables/问题3_时间分块交叉验证.csv
 problem3_outputs/tables/问题3_滞后相关性观察.csv
@@ -1019,6 +1025,7 @@ problem3_outputs/tables/问题3_交叉验证预测明细.csv
 problem3_outputs/logs/问题3_处理日志.txt
 problem3_outputs/logs/问题3_处理日志.json
 problem3_outputs/figures/问题3_训练集缺失统计.png
+problem3_outputs/figures/问题3_变量分布直方图.png
 problem3_outputs/figures/问题3_解释变量与表面位移散点图.png
 problem3_outputs/figures/问题3_实验集表面位移估计序列.png
 problem3_outputs/figures/问题3_真实值预测值散点图.png

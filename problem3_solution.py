@@ -235,6 +235,134 @@ def detect_anomalies(train: pd.DataFrame) -> pd.DataFrame:
     return flags
 
 
+def distribution_diagnostics(train: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    type_map = {
+        "a": "事件型非负连续变量",
+        "b": "连续监测变量",
+        "c": "离散计数变量",
+        "d": "连续监测变量",
+        "e": "连续监测变量",
+    }
+    for key, raw_col in VAR_NAMES.items():
+        model_col = f"{key}_建模值"
+        missing_col = f"{key}_原始缺失"
+        values = train[model_col].dropna().astype(float)
+        raw_values = train.loc[~train[missing_col].astype(bool), raw_col].dropna().astype(float)
+        mean_value = float(values.mean()) if len(values) else np.nan
+        variance_value = float(values.var(ddof=1)) if len(values) > 1 else np.nan
+        variance_mean_ratio = variance_value / mean_value if np.isfinite(mean_value) and mean_value > 0 else np.nan
+        skew_value = float(values.skew()) if len(values) > 2 else np.nan
+        kurt_value = float(values.kurt()) if len(values) > 3 else np.nan
+        normal_like = (
+            key in {"b", "d", "e"}
+            and np.isfinite(skew_value)
+            and np.isfinite(kurt_value)
+            and abs(skew_value) <= 1.0
+            and abs(kurt_value) <= 3.0
+        )
+        if key == "c":
+            poisson_note = "方差均值比较仅作为离散性诊断，不作为主异常假设"
+            criterion = "百分位数与局部突增"
+        elif key == "a":
+            poisson_note = "不适用"
+            criterion = "高分位孤立峰值与非负约束"
+        elif normal_like:
+            poisson_note = "不适用"
+            criterion = "3σ可作为对照，主判据仍保留MAD稳健规则"
+        else:
+            poisson_note = "不适用"
+            criterion = "MAD稳健统计与局部趋势残差"
+        rows.append(
+            {
+                "变量": f"{key}：{raw_col.split('_', 1)[1]}",
+                "变量类型": type_map[key],
+                "原始非缺失样本数": int(len(raw_values)),
+                "原始缺失数": int(train[missing_col].sum()),
+                "建模序列样本数": int(len(values)),
+                "最小值": float(values.min()) if len(values) else np.nan,
+                "最大值": float(values.max()) if len(values) else np.nan,
+                "均值": mean_value,
+                "中位数": float(values.median()) if len(values) else np.nan,
+                "标准差": float(values.std(ddof=1)) if len(values) > 1 else np.nan,
+                "偏度": skew_value,
+                "超额峰度": kurt_value,
+                "零值比例": float((values == 0).mean()) if len(values) else np.nan,
+                "P95": float(values.quantile(0.95)) if len(values) else np.nan,
+                "P99": float(values.quantile(0.99)) if len(values) else np.nan,
+                "P99.5": float(values.quantile(0.995)) if len(values) else np.nan,
+                "方差均值比": variance_mean_ratio,
+                "是否近似适用3σ": "是" if normal_like else "否",
+                "建议异常判据": criterion,
+                "泊松假设说明": poisson_note,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def anomaly_rule_table(train: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    for key, raw_col in VAR_NAMES.items():
+        y = train[f"{key}_补齐值"].astype(float)
+        non_missing = ~train[f"{key}_原始缺失"].astype(bool)
+        valid = y[non_missing]
+        if key == "a":
+            positive = y[(y > 0) & non_missing]
+            threshold = (
+                max(float(positive.quantile(0.995)), float(positive.median() + 8 * robust_scale(positive)))
+                if not positive.empty
+                else np.nan
+            )
+            rows.append(
+                {
+                    "变量": f"{key}：{raw_col.split('_', 1)[1]}",
+                    "变量属性": "降雨事件型变量",
+                    "是否采用正态3σ": "否",
+                    "主要阈值口径": "正降雨P99.5与中位数+8MAD取较大值，并要求前后邻点处于低雨量水平",
+                    "滑动窗口或局部尺度": "不设主滑动窗口，仅使用邻点持续性约束",
+                    "本轮主阈值": threshold,
+                    "方法说明": "保留正常降雨峰值，仅将孤立且显著高于样本主体的峰值列为异常候选",
+                }
+            )
+        elif key == "c":
+            invalid = ((y < 0) | (np.abs(y - np.round(y)) > 1e-9)) & non_missing
+            valid_count = y[non_missing & ~invalid]
+            threshold = (
+                max(float(valid_count.quantile(0.995)), float(valid_count.median() + 6 * robust_scale(valid_count)))
+                if not valid_count.empty
+                else np.nan
+            )
+            mean_value = float(valid_count.mean()) if len(valid_count) else np.nan
+            var_value = float(valid_count.var(ddof=1)) if len(valid_count) > 1 else np.nan
+            rows.append(
+                {
+                    "变量": f"{key}：{raw_col.split('_', 1)[1]}",
+                    "变量属性": "非负整数计数变量",
+                    "是否采用正态3σ": "否",
+                    "主要阈值口径": "非负整数约束、P99.5与中位数+6MAD取较大值，并结合局部突增判据",
+                    "滑动窗口或局部尺度": f"局部中位数窗口{ROLLING_MEDIAN_WINDOW}点",
+                    "本轮主阈值": threshold,
+                    "方法说明": f"泊松假设仅作诊断参考；样本均值={mean_value:.6g}，样本方差={var_value:.6g}",
+                }
+            )
+        else:
+            diff_scale = robust_scale(y.diff()[non_missing])
+            residual = y - rolling_median(y, window=ROLLING_MEDIAN_WINDOW)
+            global_residual_scale = robust_scale(residual[non_missing])
+            rows.append(
+                {
+                    "变量": f"{key}：{raw_col.split('_', 1)[1]}",
+                    "变量属性": "连续监测变量",
+                    "是否采用正态3σ": "仅作为对照，不作为主规则",
+                    "主要阈值口径": "局部趋势残差超过max(6局部MAD,4.5全局MAD)，或差分超过6全局MAD且随后反向回落",
+                    "滑动窗口或局部尺度": f"趋势窗口{ROLLING_MEDIAN_WINDOW}点，局部MAD窗口{ANOMALY_WINDOW}点",
+                    "本轮主阈值": float(4.5 * global_residual_scale),
+                    "方法说明": f"差分辅助阈值为{6.0 * diff_scale:.6g}；同时继承第一轮保守预处理中已标记的突变候选点",
+                }
+            )
+    return pd.DataFrame(rows)
+
+
 def add_lag_features(df: pd.DataFrame, selected_lags: dict[str, int]) -> pd.DataFrame:
     out = df.copy()
     for key, lag in selected_lags.items():
@@ -457,6 +585,36 @@ def make_figures(paths: Paths, train: pd.DataFrame, test: pd.DataFrame, flags: p
     plt.close(fig)
 
 
+def make_distribution_figures(paths: Paths, train: pd.DataFrame) -> None:
+    set_chinese_font()
+    fig, axes = plt.subplots(3, 2, figsize=(11, 11))
+    axes_flat = axes.ravel()
+    for ax, (key, raw_col) in zip(axes_flat, VAR_NAMES.items()):
+        values = train[f"{key}_建模值"].dropna().astype(float)
+        bins = min(60, max(12, int(np.sqrt(len(values)))))
+        ax.hist(values, bins=bins, color="#4c78a8", alpha=0.78, edgecolor="white")
+        mean_value = float(values.mean())
+        std_value = float(values.std(ddof=1))
+        median_value = float(values.median())
+        mad_scale = robust_scale(values)
+        ax.axvline(mean_value, color="#d62728", linewidth=1.1, label="均值")
+        ax.axvline(median_value, color="#2ca02c", linewidth=1.1, label="中位数")
+        if np.isfinite(std_value) and std_value > 0:
+            ax.axvline(mean_value + 3 * std_value, color="#d62728", linewidth=0.8, linestyle="--")
+            ax.axvline(mean_value - 3 * std_value, color="#d62728", linewidth=0.8, linestyle="--")
+        if np.isfinite(mad_scale) and mad_scale > 0:
+            ax.axvline(median_value + 3 * mad_scale, color="#2ca02c", linewidth=0.8, linestyle=":")
+            ax.axvline(median_value - 3 * mad_scale, color="#2ca02c", linewidth=0.8, linestyle=":")
+        ax.set_title(f"{key}：{raw_col.split('_', 1)[1]}分布")
+        ax.set_xlabel("建模序列取值")
+        ax.set_ylabel("频数")
+        ax.legend(fontsize=8)
+    axes_flat[-1].axis("off")
+    fig.tight_layout()
+    fig.savefig(paths.figures / "问题3_变量分布直方图.png", dpi=180)
+    plt.close(fig)
+
+
 def make_residual_figures(paths: Paths, model_df: pd.DataFrame) -> None:
     set_chinese_font()
     y_true = model_df["e_建模值"].to_numpy(dtype=float)
@@ -509,6 +667,8 @@ def write_outputs(
     model_comparison: pd.DataFrame,
     cv_table: pd.DataFrame,
     contribution: pd.DataFrame,
+    distribution_stats: pd.DataFrame,
+    anomaly_rules: pd.DataFrame,
     pred_test: pd.DataFrame,
     model_df: pd.DataFrame,
     log: dict,
@@ -516,6 +676,8 @@ def write_outputs(
     with pd.ExcelWriter(paths.data / "问题3_训练集预处理结果.xlsx") as writer:
         train_processed.to_excel(writer, sheet_name="训练集预处理", index=False)
         flags.to_excel(writer, sheet_name="异常标记", index=False)
+        distribution_stats.to_excel(writer, sheet_name="分布统计", index=False)
+        anomaly_rules.to_excel(writer, sheet_name="异常判据", index=False)
     with pd.ExcelWriter(paths.data / "问题3_实验集特征预处理结果.xlsx") as writer:
         test_processed.to_excel(writer, sheet_name="实验集特征预处理", index=False)
         pred_test.to_excel(writer, sheet_name="表面位移估计", index=False)
@@ -534,6 +696,8 @@ def write_outputs(
     model_comparison.to_csv(paths.tables / "问题3_模型检验指标.csv", index=False, encoding="utf-8-sig")
     cv_table.to_csv(paths.tables / "问题3_时间分块交叉验证.csv", index=False, encoding="utf-8-sig")
     contribution.to_csv(paths.tables / "问题3_变量贡献度.csv", index=False, encoding="utf-8-sig")
+    distribution_stats.to_csv(paths.tables / "问题3_变量分布统计.csv", index=False, encoding="utf-8-sig")
+    anomaly_rules.to_csv(paths.tables / "问题3_异常判据说明.csv", index=False, encoding="utf-8-sig")
 
     with open(paths.logs / "问题3_处理日志.json", "w", encoding="utf-8") as f:
         json.dump(log, f, ensure_ascii=False, indent=2)
@@ -555,6 +719,9 @@ def main() -> None:
     flags = detect_anomalies(train_processed)
     for col in [c for c in flags.columns if c.endswith("异常") or c in ["共同异常", "异常变量数量", "异常变量编码"]]:
         train_processed[col] = flags[col]
+
+    distribution_stats = distribution_diagnostics(train_processed)
+    anomaly_rules = anomaly_rule_table(train_processed)
 
     table31_rows = []
     for key, name in VAR_NAMES.items():
@@ -600,6 +767,7 @@ def main() -> None:
     test_processed["e_表面位移估计值_mm"] = pred_values
 
     make_figures(paths, train_processed, test_processed, flags, pred_test)
+    make_distribution_figures(paths, train_processed)
     make_residual_figures(paths, model_df)
 
     log = {
@@ -612,6 +780,9 @@ def main() -> None:
         "共同异常点数量": int(flags["共同异常"].sum()),
         "表3_1总数口径": "五个变量异常次数之和，不是异常编号去重数。",
         "异常编号去重数": int((flags["异常变量数量"] > 0).sum()),
+        "分布诊断口径": "对五个变量的建模序列计算直方图、偏度、超额峰度和高分位数，用于判断3σ、MAD及百分位数规则的适用性。",
+        "异常阈值口径": "连续监测变量以局部趋势残差和MAD稳健阈值为主；降雨采用高分位孤立峰值；微震事件数采用非负整数约束、百分位数阈值和局部突增判据。",
+        "微震泊松口径": "微震事件数为离散计数变量，但边坡损伤过程可能存在聚集性和阶段性，泊松分布仅作为离散性诊断，不作为主异常检测假设。",
         "候选滞后步": LAG_STEPS,
         "纳入主模型的滞后项": selected_lags,
         "建模样本口径": "训练集表面位移原始观测非缺失记录；解释变量使用问题3.1补齐与温和去噪后的建模值。",
@@ -632,6 +803,8 @@ def main() -> None:
         model_comparison,
         cv_table,
         contribution,
+        distribution_stats,
+        anomaly_rules,
         pred_test,
         model_df,
         log,
