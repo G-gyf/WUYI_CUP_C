@@ -505,6 +505,172 @@ def table_4_1(test_pred: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def apply_train_stages_at_breaks(train: pd.DataFrame, t1: int, t2: int) -> tuple[pd.DataFrame, pd.DataFrame]:
+    out = train.copy()
+    y = out["表面位移_mm"].to_numpy(dtype=float)
+    _, trend = prepare_trend(y)
+    n = len(out)
+    if t1 < MIN_SEGMENT_LENGTH or t2 - t1 < MIN_SEGMENT_LENGTH or n - t2 < MIN_SEGMENT_LENGTH:
+        raise ValueError("阶段节点不满足最小阶段长度约束。")
+
+    stage = np.ones(n, dtype=int)
+    stage[t1:t2] = 2
+    stage[t2:] = 3
+    out["阶段标签"] = stage
+    out["稳健趋势位移_mm"] = trend
+    out["滚动72点速度_mm_h"] = pd.Series(trend).diff(72) / (72 * DT_HOURS)
+    out["滚动72点加速度_mm_h2"] = out["滚动72点速度_mm_h"].diff(72) / (72 * DT_HOURS)
+
+    sse = segment_sse_function(trend)
+    sse1 = sse(0, n)
+    sse3 = sse(0, t1) + sse(t1, t2) + sse(t2, n)
+    rows = []
+    for stage_no, (left, right) in enumerate([(0, t1), (t1, t2), (t2, n)], start=1):
+        segment = out.iloc[left:right]
+        duration_h = (right - left - 1) * DT_HOURS if right - left > 1 else 0.0
+        avg_speed = (
+            (segment["表面位移_mm"].iloc[-1] - segment["表面位移_mm"].iloc[0]) / duration_h
+            if duration_h > 0
+            else np.nan
+        )
+        rows.append(
+            {
+                "阶段编号": stage_no,
+                "起始序号": left + 1,
+                "终止序号": right,
+                "起始时间": segment["时间解析"].iloc[0],
+                "终止时间": segment["时间解析"].iloc[-1],
+                "样本数": right - left,
+                "阶段平均速度_mm_h": avg_speed,
+            }
+        )
+    stage_table = pd.DataFrame(rows)
+    stage_table["三段模型SSE"] = sse3
+    stage_table["单段模型SSE"] = sse1
+    stage_table["SSE相对下降率"] = 1.0 - sse3 / sse1
+    return out, stage_table
+
+
+def fit_ridge_models_only(train: pd.DataFrame) -> dict[int, object]:
+    models: dict[int, object] = {}
+    model_def = make_pipeline(StandardScaler(), RidgeCV(alphas=RIDGE_ALPHAS))
+    for stage_no in [1, 2, 3]:
+        stage_df = train[(train["阶段标签"] == stage_no) & train["阶段归一化残差斜率_mm"].notna()].copy()
+        x = stage_df[FEATURE_COLS].to_numpy(dtype=float)
+        y = stage_df["阶段归一化残差斜率_mm"].to_numpy(dtype=float)
+        model = clone(model_def)
+        model.fit(x, y)
+        models[stage_no] = model
+    return models
+
+
+def run_problem4_variant(
+    train_raw: pd.DataFrame,
+    test_raw: pd.DataFrame,
+    t1: int,
+    t2: int,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    train_stage, stage_table = apply_train_stages_at_breaks(train_raw, t1, t2)
+    train_features = add_model_input_columns(build_features(train_stage, is_train=True))
+    test_features = add_model_input_columns(build_features(test_raw, is_train=False))
+    test_features, clip_table = clip_test_model_inputs(train_features, test_features)
+    train_features, test_features, _ = add_stage_trend(train_features, test_features)
+    models = fit_ridge_models_only(train_features)
+    train_pred, test_pred = predict_train_and_test(train_features, test_features, models)
+    table41 = table_4_1(test_pred)
+    return train_pred, test_pred, table41, stage_table
+
+
+def stage_node_sensitivity(
+    train_raw: pd.DataFrame,
+    test_raw: pd.DataFrame,
+    base_t1: int,
+    base_t2: int,
+    base_table41: pd.DataFrame,
+) -> pd.DataFrame:
+    offsets = [-144, -72, 0, 72, 144]
+    scenarios = [(0, 0)]
+    scenarios += [(offset, 0) for offset in offsets if offset != 0]
+    scenarios += [(0, offset) for offset in offsets if offset != 0]
+    scenarios += [(-72, -72), (72, 72)]
+
+    base_values = base_table41.set_index("时间点")["表面位移预测值_mm"]
+    rows = []
+    seen = set()
+    for offset1, offset2 in scenarios:
+        if (offset1, offset2) in seen:
+            continue
+        seen.add((offset1, offset2))
+        t1 = base_t1 + offset1
+        t2 = base_t2 + offset2
+        label = f"t1{offset1:+d}_t2{offset2:+d}"
+        try:
+            train_pred, test_pred, table41, stage_table = run_problem4_variant(train_raw, test_raw, t1, t2)
+            train_metrics = model_metrics(
+                train_pred["表面位移_mm"].to_numpy(dtype=float),
+                train_pred["岭回归累加拟合位移_mm"].to_numpy(dtype=float),
+                unit="mm",
+            )
+            values = table41.set_index("时间点")["表面位移预测值_mm"]
+            diff = values - base_values
+            row = {
+                "方案": label,
+                "第一节点偏移_点": offset1,
+                "第二节点偏移_点": offset2,
+                "第一节点偏移_h": offset1 * DT_HOURS,
+                "第二节点偏移_h": offset2 * DT_HOURS,
+                "第一节点时间": stage_table.iloc[0]["终止时间"],
+                "第二节点时间": stage_table.iloc[1]["终止时间"],
+                "训练集RMSE_mm": train_metrics["RMSE_mm"],
+                "训练集MAE_mm": train_metrics["MAE_mm"],
+                "训练集R2": train_metrics["R2"],
+                "实验集预测最大值_mm": float(test_pred["表面位移预测值_mm"].max()),
+                "实验集预测均值_mm": float(test_pred["表面位移预测值_mm"].mean()),
+                "表4_1最大绝对变化_mm": float(diff.abs().max()),
+            }
+            for time_value, value in values.items():
+                time_key = pd.Timestamp(time_value).strftime("%Y-%m-%d %H:%M")
+                row[f"{time_key}_预测值_mm"] = float(value)
+                row[f"{time_key}_较基准变化_mm"] = float(diff.loc[time_value])
+            rows.append(row)
+        except Exception as exc:
+            rows.append(
+                {
+                    "方案": label,
+                    "第一节点偏移_点": offset1,
+                    "第二节点偏移_点": offset2,
+                    "第一节点偏移_h": offset1 * DT_HOURS,
+                    "第二节点偏移_h": offset2 * DT_HOURS,
+                    "错误信息": str(exc),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def make_sensitivity_figure(paths: Paths, sensitivity: pd.DataFrame) -> None:
+    valid = sensitivity.dropna(subset=["表4_1最大绝对变化_mm", "训练集RMSE_mm"]).copy()
+    if valid.empty:
+        return
+    x = np.arange(len(valid))
+    plt.figure(figsize=(11.0, 5.0))
+    plt.bar(x, valid["表4_1最大绝对变化_mm"], color="#4d7c9b")
+    plt.xticks(x, valid["方案"], rotation=45, ha="right")
+    plt.ylabel("Max absolute change of Table 4.1 (mm)")
+    plt.xlabel("Stage-node perturbation scenario")
+    plt.tight_layout()
+    plt.savefig(paths.figures / "问题4_阶段节点敏感性_表4_1变化.png", dpi=200)
+    plt.close()
+
+    plt.figure(figsize=(11.0, 5.0))
+    plt.plot(x, valid["训练集RMSE_mm"], marker="o", linewidth=1.2, color="#c43c39")
+    plt.xticks(x, valid["方案"], rotation=45, ha="right")
+    plt.ylabel("Training cumulative RMSE (mm)")
+    plt.xlabel("Stage-node perturbation scenario")
+    plt.tight_layout()
+    plt.savefig(paths.figures / "问题4_阶段节点敏感性_训练误差.png", dpi=200)
+    plt.close()
+
+
 def make_figures(paths: Paths, train_pred: pd.DataFrame, test_pred: pd.DataFrame, stage_table: pd.DataFrame) -> None:
     plt.rcParams["axes.unicode_minus"] = False
 
@@ -577,6 +743,7 @@ def save_outputs(
     coef_table: pd.DataFrame,
     contrib: pd.DataFrame,
     clip_table: pd.DataFrame,
+    sensitivity_table: pd.DataFrame,
     table41: pd.DataFrame,
     log: dict[str, object],
 ) -> None:
@@ -593,6 +760,7 @@ def save_outputs(
         coef_table.to_excel(writer, sheet_name="岭回归系数", index=False)
         contrib.to_excel(writer, sheet_name="因素贡献度", index=False)
         clip_table.to_excel(writer, sheet_name="实验集特征截尾", index=False)
+        sensitivity_table.to_excel(writer, sheet_name="阶段节点敏感性", index=False)
 
     stage_table.to_csv(paths.tables / "问题4_训练集阶段划分.csv", index=False, encoding="utf-8-sig")
     trend_table.to_csv(paths.tables / "问题4_阶段趋势模型参数.csv", index=False, encoding="utf-8-sig")
@@ -601,6 +769,7 @@ def save_outputs(
     coef_table.to_csv(paths.tables / "问题4_岭回归标准化系数.csv", index=False, encoding="utf-8-sig")
     contrib.to_csv(paths.tables / "问题4_因素贡献度.csv", index=False, encoding="utf-8-sig")
     clip_table.to_csv(paths.tables / "问题4_实验集特征截尾记录.csv", index=False, encoding="utf-8-sig")
+    sensitivity_table.to_csv(paths.tables / "问题4_阶段节点敏感性分析.csv", index=False, encoding="utf-8-sig")
     table41.to_csv(paths.tables / "表4_1_实验集指定时刻预测值.csv", index=False, encoding="utf-8-sig")
 
     with (paths.logs / "问题4_处理日志.json").open("w", encoding="utf-8") as f:
@@ -627,6 +796,10 @@ def main() -> None:
     train_pred, test_pred = predict_train_and_test(train_features, test_features, models)
     table41 = table_4_1(test_pred)
     make_figures(paths, train_pred, test_pred, stage_table)
+    base_t1 = int(stage_table.iloc[0]["终止序号"])
+    base_t2 = int(stage_table.iloc[1]["终止序号"])
+    sensitivity_table = stage_node_sensitivity(train_raw, test_raw, base_t1, base_t2, table41)
+    make_sensitivity_figure(paths, sensitivity_table)
 
     train_disp_metrics = model_metrics(
         train_pred["表面位移_mm"].to_numpy(dtype=float),
@@ -649,6 +822,13 @@ def main() -> None:
         "模型分解": "阶段趋势项 + 趋势外残差增量项；实验集残差增量在各阶段内中心化，仅修正局部形态",
         "实验集初始位移基准_mm": float(train_raw["表面位移_mm"].iloc[0]),
         "累加拟合位移误差": train_disp_metrics,
+        "阶段节点敏感性分析方案数": int(len(sensitivity_table)),
+        "阶段节点敏感性表4_1最大绝对变化_mm": (
+            float(sensitivity_table["表4_1最大绝对变化_mm"].dropna().max())
+            if "表4_1最大绝对变化_mm" in sensitivity_table
+            and not sensitivity_table["表4_1最大绝对变化_mm"].dropna().empty
+            else None
+        ),
         "表4_1": table41.to_dict(orient="records"),
         "输出目录": str(paths.out),
     }
@@ -663,6 +843,7 @@ def main() -> None:
         coef_table,
         contrib,
         clip_table,
+        sensitivity_table,
         table41,
         log,
     )
