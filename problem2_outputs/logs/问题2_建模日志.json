@@ -1,0 +1,40 @@
+{
+  "source_file": "C:\\Desktop\\2026-51MCM-Problem C\\C 附件(Attachment)\\附件2：位移时序数据-问题2.xlsx",
+  "rows": 10000,
+  "id_continuous": true,
+  "time_start": "2024-05-04 00:00:00",
+  "time_end": "2024-07-12 10:30:00",
+  "missing_counts": {
+    "编号": 0,
+    "表面位移_mm": 0
+  },
+  "non_initial_zero_count": 6,
+  "jump_candidate_count": 443,
+  "main_smooth_window": 61,
+  "transition_1": {
+    "index_0_based": 5274,
+    "sequence_no": 5275,
+    "time": "2024-06-09 15:00:00",
+    "raw_displacement": 154.397,
+    "trend_displacement": 154.52
+  },
+  "transition_2": {
+    "index_0_based": 8866,
+    "sequence_no": 8867,
+    "time": "2024-07-04 13:40:00",
+    "raw_displacement": 522.731,
+    "trend_displacement": 522.731
+  },
+  "outputs": {
+    "excel": "C:\\Desktop\\2026-51MCM-Problem C\\problem2_outputs\\data\\问题2_阶段划分结果.xlsx",
+    "transition_table": "C:\\Desktop\\2026-51MCM-Problem C\\problem2_outputs\\tables\\问题2_阶段转换节点.csv",
+    "stage_models": "C:\\Desktop\\2026-51MCM-Problem C\\problem2_outputs\\tables\\问题2_分阶段模型参数.csv",
+    "stage_speed": "C:\\Desktop\\2026-51MCM-Problem C\\problem2_outputs\\tables\\问题2_阶段平均速度.csv",
+    "metrics": "C:\\Desktop\\2026-51MCM-Problem C\\problem2_outputs\\tables\\问题2_模型检验指标.csv",
+    "figures": [
+      "C:\\Desktop\\2026-51MCM-Problem C\\problem2_outputs\\figures\\问题2_位移阶段划分图.png",
+      "C:\\Desktop\\2026-51MCM-Problem C\\problem2_outputs\\figures\\问题2_分阶段拟合图.png",
+      "C:\\Desktop\\2026-51MCM-Problem C\\problem2_outputs\\figures\\问题2_速度加速度诊断图.png"
+    ]
+  }
+}
