@@ -360,8 +360,7 @@ def stagewise_time_folds(df: pd.DataFrame, splits: int = CV_SPLITS) -> list[np.n
     return folds
 
 
-def evaluate_combination(df: pd.DataFrame, selected_vars: list[str]) -> tuple[dict[str, object], np.ndarray]:
-    X, _ = build_model_matrix(df, selected_vars)
+def evaluate_feature_matrix(df: pd.DataFrame, X: pd.DataFrame) -> tuple[dict[str, float], dict[str, float], dict[str, float], np.ndarray]:
     y = df["表面位移_mm"].to_numpy(dtype=float)
     model = make_pipeline(StandardScaler(), RidgeCV(alphas=RIDGE_ALPHAS))
     model.fit(X, y)
@@ -382,6 +381,12 @@ def evaluate_combination(df: pd.DataFrame, selected_vars: list[str]) -> tuple[di
         stage_rmse[f"阶段{stage_no}_CV_RMSE_mm"] = float(
             np.sqrt(mean_squared_error(y[mask], cv_pred[mask]))
         )
+    return train_metrics, cv_metrics, stage_rmse, cv_pred
+
+
+def evaluate_combination(df: pd.DataFrame, selected_vars: list[str]) -> tuple[dict[str, object], np.ndarray]:
+    X, _ = build_model_matrix(df, selected_vars)
+    train_metrics, cv_metrics, stage_rmse, cv_pred = evaluate_feature_matrix(df, X)
     row = {
         "剔除变量": next(var for var in CANDIDATES if var not in selected_vars),
         "纳入变量": "、".join(selected_vars),
@@ -395,6 +400,40 @@ def evaluate_combination(df: pd.DataFrame, selected_vars: list[str]) -> tuple[di
     }
     row["阶段CV_RMSE最大值_mm"] = max(stage_rmse.values())
     return row, cv_pred
+
+
+def trend_baseline_comparison(df: pd.DataFrame, best_row: pd.Series) -> pd.DataFrame:
+    X = trend_features(df)
+    train_metrics, cv_metrics, stage_rmse, _ = evaluate_feature_matrix(df, X)
+    baseline = {
+        "模型": "仅阶段趋势基准模型",
+        "训练RMSE_mm": train_metrics["RMSE_mm"],
+        "训练MAE_mm": train_metrics["MAE_mm"],
+        "训练R2": train_metrics["R2"],
+        "时间分块CV_RMSE_mm": cv_metrics["RMSE_mm"],
+        "时间分块CV_MAE_mm": cv_metrics["MAE_mm"],
+        "时间分块CV_R2": cv_metrics["R2"],
+        **stage_rmse,
+    }
+    best = {
+        "模型": "阶段趋势+最优五变量模型",
+        "训练RMSE_mm": float(best_row["训练RMSE_mm"]),
+        "训练MAE_mm": float(best_row["训练MAE_mm"]),
+        "训练R2": float(best_row["训练R2"]),
+        "时间分块CV_RMSE_mm": float(best_row["时间分块CV_RMSE_mm"]),
+        "时间分块CV_MAE_mm": float(best_row["时间分块CV_MAE_mm"]),
+        "时间分块CV_R2": float(best_row["时间分块CV_R2"]),
+        "阶段1_CV_RMSE_mm": float(best_row["阶段1_CV_RMSE_mm"]),
+        "阶段2_CV_RMSE_mm": float(best_row["阶段2_CV_RMSE_mm"]),
+        "阶段3_CV_RMSE_mm": float(best_row["阶段3_CV_RMSE_mm"]),
+    }
+    table = pd.DataFrame([baseline, best])
+    baseline_rmse = float(table.loc[0, "时间分块CV_RMSE_mm"])
+    best_rmse = float(table.loc[1, "时间分块CV_RMSE_mm"])
+    table["相对基准CV_RMSE改善率"] = np.nan
+    if baseline_rmse > 0:
+        table.loc[1, "相对基准CV_RMSE改善率"] = (baseline_rmse - best_rmse) / baseline_rmse
+    return table
 
 
 def compare_variable_combinations(df: pd.DataFrame) -> pd.DataFrame:
@@ -443,7 +482,11 @@ def fit_best_model(df: pd.DataFrame, selected_vars: list[str]) -> tuple[pd.DataF
     return detail, coef_table, contrib
 
 
-def warning_thresholds(df: pd.DataFrame, stage_table: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+def warning_thresholds(
+    df: pd.DataFrame,
+    stage_table: pd.DataFrame,
+    persistence_points: int = PERSISTENCE_POINTS,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     velocity = df["平滑速度_mm_h"].fillna(0.0)
     stage1 = velocity[df["阶段标签"] == 1]
     stage2 = velocity[df["阶段标签"] == 2]
@@ -467,7 +510,7 @@ def warning_thresholds(df: pd.DataFrame, stage_table: pd.DataFrame) -> tuple[pd.
                 "速度条件_mm_h": f"{t1:.3f} <= v < {t2:.3f}",
                 "阈值下界_mm_h": t1,
                 "阈值上界_mm_h": t2,
-                "持续性判据": f"连续不少于{PERSISTENCE_POINTS}个采样点",
+                "持续性判据": f"连续不少于{persistence_points}个采样点",
                 "设置依据": "超过缓慢阶段常态速度上界",
             },
             {
@@ -475,7 +518,7 @@ def warning_thresholds(df: pd.DataFrame, stage_table: pd.DataFrame) -> tuple[pd.
                 "速度条件_mm_h": f"{t2:.3f} <= v < {t3:.3f}",
                 "阈值下界_mm_h": t2,
                 "阈值上界_mm_h": t3,
-                "持续性判据": f"连续不少于{PERSISTENCE_POINTS}个采样点",
+                "持续性判据": f"连续不少于{persistence_points}个采样点",
                 "设置依据": "达到加速阶段高分位速度水平",
             },
             {
@@ -483,7 +526,7 @@ def warning_thresholds(df: pd.DataFrame, stage_table: pd.DataFrame) -> tuple[pd.
                 "速度条件_mm_h": f"v >= {t3:.3f}",
                 "阈值下界_mm_h": t3,
                 "阈值上界_mm_h": np.inf,
-                "持续性判据": f"连续不少于{PERSISTENCE_POINTS}个采样点",
+                "持续性判据": f"连续不少于{persistence_points}个采样点",
                 "设置依据": "达到快速形变阶段典型速度水平",
             },
         ]
@@ -492,7 +535,7 @@ def warning_thresholds(df: pd.DataFrame, stage_table: pd.DataFrame) -> tuple[pd.
     code = np.zeros(len(df), dtype=int)
     for threshold, level in [(t1, 1), (t2, 2), (t3, 3)]:
         exceed = (velocity >= threshold).astype(int)
-        sustained = exceed.rolling(PERSISTENCE_POINTS, min_periods=PERSISTENCE_POINTS).sum() >= PERSISTENCE_POINTS
+        sustained = exceed.rolling(persistence_points, min_periods=persistence_points).sum() >= persistence_points
         code[sustained.fillna(False).to_numpy()] = level
     names = np.array(["正常", "关注", "警戒", "危险"], dtype=object)
     warning = pd.DataFrame(
@@ -507,7 +550,38 @@ def warning_thresholds(df: pd.DataFrame, stage_table: pd.DataFrame) -> tuple[pd.
     return thresholds, warning
 
 
-def make_figures(paths: Paths, detail: pd.DataFrame, stage_table: pd.DataFrame, combo: pd.DataFrame, thresholds: pd.DataFrame) -> None:
+def warning_sensitivity(df: pd.DataFrame, persistence_values: list[int] | None = None) -> pd.DataFrame:
+    if persistence_values is None:
+        persistence_values = [3, 6, 12]
+    rows = []
+    for persistence in persistence_values:
+        _, warning = warning_thresholds(df, pd.DataFrame(), persistence_points=persistence)
+        counts = warning["预警等级"].value_counts().to_dict()
+        row = {
+            "连续采样点数": persistence,
+            "持续时间_h": persistence * DT_HOURS,
+            "正常样本数": int(counts.get("正常", 0)),
+            "关注样本数": int(counts.get("关注", 0)),
+            "警戒样本数": int(counts.get("警戒", 0)),
+            "危险样本数": int(counts.get("危险", 0)),
+        }
+        row["关注及以上样本数"] = row["关注样本数"] + row["警戒样本数"] + row["危险样本数"]
+        row["警戒及以上样本数"] = row["警戒样本数"] + row["危险样本数"]
+        row["关注及以上占比"] = row["关注及以上样本数"] / len(df)
+        row["警戒及以上占比"] = row["警戒及以上样本数"] / len(df)
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def make_figures(
+    paths: Paths,
+    detail: pd.DataFrame,
+    stage_table: pd.DataFrame,
+    combo: pd.DataFrame,
+    thresholds: pd.DataFrame,
+    baseline_compare: pd.DataFrame,
+    warning_sens: pd.DataFrame,
+) -> None:
     plt.rcParams["axes.unicode_minus"] = False
     try:
         plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "DejaVu Sans"]
@@ -550,6 +624,36 @@ def make_figures(paths: Paths, detail: pd.DataFrame, stage_table: pd.DataFrame, 
     plt.savefig(paths.figures / "问题5_速度阈值预警图.png", dpi=200)
     plt.close()
 
+    plt.figure(figsize=(7.8, 4.8))
+    plt.bar(baseline_compare["模型"], baseline_compare["时间分块CV_RMSE_mm"], color=["#8d99ae", "#4d7c9b"])
+    plt.ylabel("Time-block CV RMSE (mm)")
+    plt.xlabel("Model")
+    plt.xticks(rotation=15, ha="right")
+    plt.tight_layout()
+    plt.savefig(paths.figures / "问题5_阶段趋势基准模型对比.png", dpi=200)
+    plt.close()
+
+    sens_plot = warning_sens.melt(
+        id_vars=["连续采样点数"],
+        value_vars=["关注样本数", "警戒样本数", "危险样本数"],
+        var_name="预警等级",
+        value_name="样本数",
+    )
+    levels = ["关注样本数", "警戒样本数", "危险样本数"]
+    x = np.arange(len(warning_sens))
+    width = 0.22
+    plt.figure(figsize=(8.8, 4.8))
+    for offset, level, color in zip([-width, 0.0, width], levels, ["#d18f1b", "#c97028", "#c43c39"]):
+        values = sens_plot[sens_plot["预警等级"] == level]["样本数"].to_numpy()
+        plt.bar(x + offset, values, width=width, label=level.replace("样本数", ""), color=color)
+    plt.xticks(x, warning_sens["连续采样点数"].astype(str))
+    plt.xlabel("Persistence points")
+    plt.ylabel("Number of samples")
+    plt.legend(frameon=False)
+    plt.tight_layout()
+    plt.savefig(paths.figures / "问题5_预警阈值敏感性分析.png", dpi=200)
+    plt.close()
+
 
 def save_outputs(
     paths: Paths,
@@ -561,6 +665,8 @@ def save_outputs(
     thresholds: pd.DataFrame,
     warning: pd.DataFrame,
     warning_summary: pd.DataFrame,
+    baseline_compare: pd.DataFrame,
+    warning_sens: pd.DataFrame,
     log: dict[str, object],
 ) -> None:
     detail.to_csv(paths.data / "问题5_建模明细.csv", index=False, encoding="utf-8-sig")
@@ -573,6 +679,8 @@ def save_outputs(
         contrib.to_excel(writer, sheet_name="因素贡献度", index=False)
         thresholds.to_excel(writer, sheet_name="预警阈值", index=False)
         warning_summary.to_excel(writer, sheet_name="预警等级统计", index=False)
+        baseline_compare.to_excel(writer, sheet_name="阶段趋势基准对比", index=False)
+        warning_sens.to_excel(writer, sheet_name="预警敏感性", index=False)
 
     stage_table.to_csv(paths.tables / "问题5_阶段划分与平均速度.csv", index=False, encoding="utf-8-sig")
     combo.to_csv(paths.tables / "问题5_变量组合误差比较.csv", index=False, encoding="utf-8-sig")
@@ -580,6 +688,8 @@ def save_outputs(
     contrib.to_csv(paths.tables / "问题5_最优模型因素贡献度.csv", index=False, encoding="utf-8-sig")
     thresholds.to_csv(paths.tables / "问题5_预警阈值表.csv", index=False, encoding="utf-8-sig")
     warning_summary.to_csv(paths.tables / "问题5_预警等级统计.csv", index=False, encoding="utf-8-sig")
+    baseline_compare.to_csv(paths.tables / "问题5_阶段趋势基准模型对比.csv", index=False, encoding="utf-8-sig")
+    warning_sens.to_csv(paths.tables / "问题5_预警阈值敏感性分析.csv", index=False, encoding="utf-8-sig")
 
     with (paths.logs / "问题5_处理日志.json").open("w", encoding="utf-8") as f:
         json.dump(log, f, ensure_ascii=False, indent=2, default=str)
@@ -597,8 +707,10 @@ def main() -> None:
     combo = compare_variable_combinations(staged)
     best_row = combo.iloc[0]
     best_vars = str(best_row["纳入变量"]).split("、")
+    baseline_compare = trend_baseline_comparison(staged, best_row)
     detail, coef_table, contrib = fit_best_model(staged, best_vars)
     thresholds, warning = warning_thresholds(detail, stage_table)
+    warning_sens = warning_sensitivity(detail)
     detail = detail.merge(warning[["时间", "预警等级编码", "预警等级"]], on="时间", how="left")
     warning_summary = (
         warning.groupby(["预警等级编码", "预警等级"], as_index=False)
@@ -607,7 +719,7 @@ def main() -> None:
         .sort_values("预警等级编码")
     )
     warning_summary["样本占比"] = warning_summary["样本数"] / len(warning)
-    make_figures(paths, detail, stage_table, combo, thresholds)
+    make_figures(paths, detail, stage_table, combo, thresholds, baseline_compare, warning_sens)
 
     best_metrics = model_metrics(
         detail["表面位移_mm"].to_numpy(dtype=float),
@@ -631,11 +743,26 @@ def main() -> None:
             "MAE_mm": float(best_row["时间分块CV_MAE_mm"]),
             "R2": float(best_row["时间分块CV_R2"]),
         },
+        "仅阶段趋势基准模型对比": baseline_compare.to_dict(orient="records"),
         "预警阈值口径": "依据附件5自身平滑速度分布设置阈值；关注阈值取第一阶段75分位，警戒阈值取第二阶段90分位与二三阶段中位速度分界的较大值，危险阈值取第三阶段中位速度并保持单调。",
         "预警持续性判据_采样点": PERSISTENCE_POINTS,
+        "预警阈值敏感性分析": warning_sens.to_dict(orient="records"),
         "输出目录": str(paths.out),
     }
-    save_outputs(paths, detail, stage_table, combo, coef_table, contrib, thresholds, warning, warning_summary, log)
+    save_outputs(
+        paths,
+        detail,
+        stage_table,
+        combo,
+        coef_table,
+        contrib,
+        thresholds,
+        warning,
+        warning_summary,
+        baseline_compare,
+        warning_sens,
+        log,
+    )
 
     print("问题五建模完成")
     print("阶段划分：")
@@ -643,8 +770,12 @@ def main() -> None:
     print("变量组合误差比较：")
     print(combo[["排序", "剔除变量", "时间分块CV_RMSE_mm", "时间分块CV_MAE_mm", "时间分块CV_R2"]].to_string(index=False))
     print("最优组合：", "、".join(best_vars), "；剔除变量：", best_row["剔除变量"])
+    print("阶段趋势基准模型对比：")
+    print(baseline_compare[["模型", "时间分块CV_RMSE_mm", "时间分块CV_MAE_mm", "时间分块CV_R2", "相对基准CV_RMSE改善率"]].to_string(index=False))
     print("预警阈值：")
     print(thresholds[["预警等级", "速度条件_mm_h", "持续性判据"]].to_string(index=False))
+    print("预警阈值敏感性分析：")
+    print(warning_sens.to_string(index=False))
 
 
 if __name__ == "__main__":
